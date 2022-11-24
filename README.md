@@ -1,2 +1,2 @@
 # meshmon-ml
-mesh network monitoring PCA analysis
+mesh network monitoring ML analysis using routing tables
