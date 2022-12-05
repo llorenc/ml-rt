@@ -6,6 +6,7 @@
 # https://docs.h5py.org/en/stable/quick.html
 
 # imports
+import IPython
 import sklearn as skl
 import importlib
 import os
@@ -35,10 +36,16 @@ from pyod.models.lof import LOF
 from pyod.models.mcd import MCD
 from pyod.models.ocsvm import OCSVM
 from pyod.models.lscp import LSCP
-if 'tensorflow' in sys.modules:
+classifiers = {}
+try:
     from pyod.models.auto_encoder import AutoEncoder
     from pyod.models.vae import VAE
-else:
+    classifiers.update({
+        'Variational auto encoder (VAE)':
+        VAE(encoder_neurons=[128, 64, 32], decoder_neurons=[32, 64, 128], 
+            epochs=30, batch_size=32,
+            dropout_rate=0.2,contamination=contamination_est, verbose=1)})
+except:
     print("skipping VAE, tensorflow not installed")
 import time
 import shap
@@ -82,7 +89,7 @@ anom = ['2021-04-14 01:55:00', '2021-04-14 18:10:00']
 contamination_est = 0.005
 # random_state = np.random.RandomState(42)
 random_state  = 42
-classifiers = {
+classifiers.update({
     'Cluster-based Local Outlier Factor (CBLOF)':
         CBLOF(contamination=contamination_est,
               check_estimator=False,
@@ -99,16 +106,7 @@ classifiers = {
                                 max_features=1.0,
                                 bootstrap=False,
                                 n_jobs=-1),
-}
-
-if 'VAE' in sys.modules: 
-    classifiers.update({
-        'Variational auto encoder (VAE)':
-        VAE(encoder_neurons=[128, 64, 32], decoder_neurons=[32, 64, 128], 
-            epochs=30, batch_size=32,
-            dropout_rate=0.2,contamination=contamination_est, verbose=1)})
-else:
-    print("skipping VAE classifier, library not installed")
+})
 
 #
 # functions
@@ -209,8 +207,8 @@ def compute_IF(id, anom):
     """
     anomaly detection for node id using the training_mat,testing_mat datasets.
     """
-    global IF_anom
-    global training_mat,testing_mat
+    global IF_anom, classifiers
+    global training_mat, testing_mat
     metrics_training = get_metrics_from_node(training_mat['metric'], training_mat['date'], id)
     metrics_testing = get_metrics_from_node(testing_mat['metric'], testing_mat['date'], id)
     # take anomalies only on dates where the node is alive
@@ -235,10 +233,42 @@ def compute_IF(id, anom):
     IF_anom.update({id: pkl_IF})
     return count_anom(pkl_IF['y_pred_idx_test'], anom) # 10/4
 
+# VAE
+VAE_anom = {} # dictionary with the anomalies detected by VAE for each node
+def compute_VAE(id, anom):
+    """
+    anomaly detection for node id using the training_mat,testing_mat datasets.
+    """
+    global VAE_anom, classifiers
+    global training_mat,testing_mat
+    metrics_training = get_metrics_from_node(training_mat['metric'], training_mat['date'], id)
+    metrics_testing = get_metrics_from_node(testing_mat['metric'], testing_mat['date'], id)
+    # take anomalies only on dates where the node is alive
+    valid_days = [sum(metrics_testing.iloc[id]>0)>0 for id in range(metrics_testing.shape[0])]
+    if sum(valid_days) == 0:
+        error("skipping node {} ({}): not alive during any testing captures".format(
+            id, uid.uid2hname(id2uid(id, training_mat['uid']))))
+        return (0, 0)
+    metrics_testing = metrics_testing.iloc[valid_days]
+    clf_name = 'Variational auto encoder (VAE)'
+    clf = classifiers[clf_name]
+    model_dir = os.getcwd() + "/models"
+    filen = os.path.join(model_dir, 
+                         "clf-{}-{}.pkl".format(type(clf).__name__, id))
+    pkl_VAE = read_data_file(
+        filen, False, build_model, 
+        args={'clf_name': clf_name, 'clf': clf,
+              'df': metrics_training,
+              'df_testing': metrics_testing})
+    pkl_VAE['stop_training_time']
+    pkl_VAE['stop_prediction_time']
+    VAE_anom.update({id: pkl_VAE})
+    return count_anom(pkl_VAE['y_pred_idx_test'], anom) # 10/4
+
 #
 # plotting
 #
-def plot_anom(anom_count, node_count):
+def plot_anom(anom_count, node_count, method):
     """ Plot the anomalies from anom_count and the number of nodes in node_count.
     """
     df = anom_count.copy()
@@ -246,10 +276,12 @@ def plot_anom(anom_count, node_count):
     plt.rcParams.update({'font.size': 10})
     fig, ax = plt.subplots(figsize=(8,5))
     df.sort_values(by=['index'], ascending=True).plot.scatter(x='index',y='count', fontsize=10, ax=ax, c='red')
-    node_count.plot.line(x='index', ax=ax)
+    # node_count.plot.line(x='index', ax=ax)
+    node_count.plot(drawstyle="steps", x='index', ax=ax)
     [ax.axvline(np.datetime64(v), color="r", ls='--') for v in anom]
     # [ax.axhline(y, color="b", ls='--') for y in [len(training_mat['uid']), len(training_mat['uid'])/2]]
-    ax.set_title("{}/{}".format(
+    ax.set_title("{} {}/{}".format(
+        method,
         count_anom(anom_count[df['count']>node_count['vote']]['index'], anom),
         count_anom(testing_mat['date'], anom)))
     ax.set_xlabel("date (testing set)")
@@ -293,6 +325,13 @@ for id in range(len(training_mat['uid'])):
         id, uid.uid2hname(id2uid(id, training_mat['uid'])), compute_IF(id, anom)))
 
 #
+# build VAE data
+#
+for id in range(len(training_mat['uid'])):
+    print("id {} ({}), anomalies: {}".format(
+        id, uid.uid2hname(id2uid(id, training_mat['uid'])), compute_VAE(id, anom)))
+
+#
 # plot ressults
 #
 
@@ -307,9 +346,22 @@ node_count = pd.DataFrame.from_dict(
           [sum(testing_mat['metric'][i][live_node[i]]>-1)/2 for i in range(len(testing_mat['date']))]})
 
 # count the anomalies found in IF_anom
-anom_count = count_anom_from_nodes(testing_mat['date'], IF_anom)
-len(anom_count)
+anom_count_IF = count_anom_from_nodes(testing_mat['date'], IF_anom)
+len(anom_count_IF)
 
-plot_anom(anom_count, node_count)
+plot_anom(anom_count_IF, node_count, 'IF')
+
+# count the anomalies found in VAE_anom
+anom_count_VAE = count_anom_from_nodes(testing_mat['date'], VAE_anom)
+len(anom_count_VAE)
+
+plot_anom(anom_count_VAE, node_count, 'VAE')
 
 # save_figure("anomalies-using-metrics-IF.pdf")
+
+#
+# testing
+#
+node_count.head(50)
+capture = 4
+[sum(testing_mat['metric'][capture][i]>-1) for i in range(testing_mat['metric'][capture].shape[0])]
