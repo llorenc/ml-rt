@@ -393,7 +393,7 @@ def get_ML_data(ftrain, date, ML):
     compress_pickle((ML_anom, node_count, anom_count_ML), fname)
     return ML_anom, node_count, anom_count_ML
 
-if False: '''
+#if False: '''
 #
 # build IF data
 #
@@ -464,13 +464,13 @@ len(anom_count_VAE)
 plot_anom(anom_count_VAE, node_count, 'VAE', anom)
 
 # save_figure("anomalies-using-metrics-VAE_anom.pdf")
-'''
+#'''
 
 #
 # other months
 #
 
-if False: '''
+#if False: '''
 #
 # IF
 #
@@ -491,7 +491,7 @@ for m in range(3, 4+1):
     date = "{}-{:02d}".format(year, m)
     IF_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'IF')
     plot_anom(anom_count_ML, node_count, 'IF', title=date, fname="ml-IF-{}.pdf".format(date))
-'''
+#'''
 
 #
 # CBLOF
