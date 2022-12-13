@@ -26,6 +26,8 @@ import matplotlib.pyplot as plt
 import matplotlib
 import matplotlib.font_manager as font_manager
 plt.ion()  # interactive non-blocking mode
+import time
+import shap
 
 from pyod.models.abod import ABOD
 from pyod.models.cblof import CBLOF
@@ -37,8 +39,14 @@ from pyod.models.lof import LOF
 from pyod.models.mcd import MCD
 from pyod.models.ocsvm import OCSVM
 from pyod.models.lscp import LSCP
+
+# pyod parameters
+contamination_est = 0.005
+# random_state = np.random.RandomState(42)
+random_state  = 42
 classifiers = {}
 try:
+    print("importing VAE")
     from pyod.models.auto_encoder import AutoEncoder
     from pyod.models.vae import VAE
     classifiers.update({
@@ -48,13 +56,11 @@ try:
             dropout_rate=0.2,contamination=contamination_est, verbose=1)})
 except:
     print("skipping VAE, tensorflow not installed")
-import time
-import shap
 
 # wd
 pwd = os.getcwd()
 print('pwd: ' + pwd)
-if not os.path.exists("ml-rt.pl"):
+if not os.path.exists("ml-rt.py"):
     wd = os.environ['HOME'] + '/recerca/connexio-guifinet/meshmon/py-nade/ml-rt'
     if os.path.exists(wd):
         print('wd: ' + wd)
@@ -116,10 +122,6 @@ training_mat = load_and_compress_pickle(dd + ftrain)
 # anomaly interval (gateway outage)
 anom = ['2021-04-14 01:55:00', '2021-04-14 18:10:00']
 
-# pyod parameters
-contamination_est = 0.005
-# random_state = np.random.RandomState(42)
-random_state  = 42
 classifiers.update({
     'Cluster-based Local Outlier Factor (CBLOF)':
         CBLOF(contamination=contamination_est,
@@ -391,6 +393,7 @@ def get_ML_data(ftrain, date, ML):
     compress_pickle((ML_anom, node_count, anom_count_ML), fname)
     return ML_anom, node_count, anom_count_ML
 
+if False: '''
 #
 # build IF data
 #
@@ -461,11 +464,13 @@ len(anom_count_VAE)
 plot_anom(anom_count_VAE, node_count, 'VAE', anom)
 
 # save_figure("anomalies-using-metrics-VAE_anom.pdf")
+'''
 
 #
 # other months
 #
 
+if False: '''
 #
 # IF
 #
@@ -486,28 +491,30 @@ for m in range(3, 4+1):
     date = "{}-{:02d}".format(year, m)
     IF_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'IF')
     plot_anom(anom_count_ML, node_count, 'IF', title=date, fname="ml-IF-{}.pdf".format(date))
+'''
 
 #
 # CBLOF
 #
-date = "21-04"
-CBLOF_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'CBLOF')
-plot_anom(anom_count_ML, node_count, 'CBLOF', title=date, fname="ml-CBLOF-{}.pdf".format(date))
+# date = "21-04"
+# CBLOF_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'CBLOF')
+# plot_anom(anom_count_ML, node_count, 'CBLOF', title=date, fname="ml-CBLOF-{}.pdf".format(date))
 
 # building multiple files
 year = '21'
-for m in range(3, 4+1):
+for m in range(3, 12+1):
     date = "{}-{:02d}".format(year, m)
     print(date)
     CBLOF_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'CBLOF')
 
 # plotting multiple files
-year = '21'
-for m in range(3, 4+1):
-    date = "{}-{:02d}".format(year, m)
-    CBLOF_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'CBLOF')
-    plot_anom(anom_count_ML, node_count, 'CBLOF', title=date, fname="ml-CBLOF-{}.pdf".format(date))
+# year = '21'
+# for m in range(3, 4+1):
+#     date = "{}-{:02d}".format(year, m)
+#     CBLOF_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'CBLOF')
+#     plot_anom(anom_count_ML, node_count, 'CBLOF', title=date, fname="ml-CBLOF-{}.pdf".format(date))
 
+exit
 #
 # VAE
 #
@@ -529,6 +536,10 @@ for m in range(3, 4+1):
     VAE_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'VAE')
     plot_anom(anom_count_ML, node_count, 'VAE', title=date, fname="ml-VAE-{}.pdf".format(date))
 
+#
+#
+#
+exit
 #
 # testing
 #
