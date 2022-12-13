@@ -169,7 +169,7 @@ def read_data_file(fname, force, callf, args):
     """ Reads data from an existing file or calls callf to create it
     otherwise. 
     """
-    if not force and os.path.isfile(fname):
+    if not force and (os.path.isfile(fname) or os.path.isfile(fname+'.bz2')):
         say("reading file: " + fname)
         if 'VAE' in str(fname):
             res = load_and_compress_pickle(fname)
@@ -465,6 +465,7 @@ plot_anom(anom_count_VAE, node_count, 'VAE', anom)
 #
 # other months
 #
+
 #
 # IF
 #
