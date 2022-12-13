@@ -1,6 +1,6 @@
 #!/usr/bin/python3 -d
 # -*- coding: utf-8 -*-
-# process training_dataset.pkl and testing_dataset.pkl with RT datasets
+# process ml-rt-training_dataset.pkl and ml-rt-testing_dataset.pkl with RT datasets
 # (c) Llorenç Cerdà-Alabern, September 2022.
 # debug: import pdb; pdb.set_trace()
 # https://docs.h5py.org/en/stable/quick.html
@@ -19,6 +19,7 @@ import json
 import click   ## https://click.palletsprojects.com/en/7.x
 import fnmatch
 from operator import itemgetter
+import bz2
 import pickle
 import sys
 import matplotlib.pyplot as plt
@@ -49,7 +50,6 @@ except:
     print("skipping VAE, tensorflow not installed")
 import time
 import shap
-import pickle
 
 # wd
 pwd = os.getcwd()
@@ -72,15 +72,46 @@ def force_import(name):
     return imported[name]
 uid = force_import("uid")
 
+def say(msg):
+    if not type(msg) is str:
+        msg = str(msg)
+    click.secho(msg, fg="green")
+
+# Pickle a file and then compress it into a file with extension 
+def compress_pickle(data, fname):
+    if not re.search(r'bz2$', fname):
+        fname = "{}.bz2".format(fname)
+    with bz2.BZ2File(fname, 'w') as fh:
+        pickle.dump(data, fh)
+# Load any compressed pickle file
+def decompress_pickle(file):
+    data = bz2.BZ2File(file, 'rb')
+    return pickle.load(data)
+# 
+def load_and_compress_pickle(fn):
+    zf = "{}.bz2".format(fn)
+    if os.path.exists(zf):
+        say("reading {}".format(zf))
+        return decompress_pickle(zf)
+    #
+    if os.path.exists(fn):
+        with open(fn, 'rb') as filehandle:
+            data = pickle.load(filehandle)
+        say("building {}".format(zf))
+        compress_pickle(data, zf)
+        return data
+    error("pickle file {}?".format(fn))
+    return None
+
 # variables
 # dataset directory
 dd = os.environ['HOME'] + '/recerca/connexio-guifinet/meshmon/py-nade/ml/datasets/'
 
-with open(dd + "testing_dataset.pkl", 'rb') as filehandle:
-    testing_mat = pickle.load(filehandle)
+ftest = "ml-rt-testing_dataset.pkl"
+testing_mat = load_and_compress_pickle(dd + ftest)
 
-with open(dd + "training_dataset.pkl", 'rb') as filehandle:
-    training_mat = pickle.load(filehandle)
+ftrain = "ml-rt-training_dataset.pkl"
+training_mat = load_and_compress_pickle(dd + ftrain)
 
 # anomaly interval (gateway outage)
 anom = ['2021-04-14 01:55:00', '2021-04-14 18:10:00']
@@ -116,27 +147,22 @@ def error(msg):
         msg = str(msg)
     click.secho(msg, fg="red")
 
-def say(msg):
-    if not type(msg) is str:
-        msg = str(msg)
-    click.secho(msg, fg="green")
-
-def get_metrics_from_node(data, date, id):
+def get_metrics_from_node(data, id):
     """Returns a DF with the routing metrics of node id along the metrics
-    matrices stored in data. Each matrix in data corresponds to
-    matrices of a capture with date in argument date. The index of the
-    DF contains the date and each colum the metric to a node with uid
+    matrices stored in data. Each matrix in data['metric'] corresponds to
+    matrices of a capture with data['date'] in argument date. The index of the
+    DF contains the date and each colum the metric to a node with data['uid']
     as column name.
     """
-    nrows = len(data) # number of captures
-    ncols = data[0].shape[0] # number of nodes (dimension of the metrics matrices)
+    nrows = len(data['metric']) # number of captures
+    ncols = data['metric'][0].shape[0] # number of nodes (dimension of the metrics matrices)
     metrics = np.empty((nrows, ncols))
     for i in range(nrows):
-        metrics[i] = data[i][id] # metrics of node id to reach every
+        metrics[i] = data['metric'][i][id] # metrics of node id to reach every
                                  # other node in capture i
     metrics[:,id] = 0 # set self maximum metric to 0
-    df_metrics = pd.DataFrame(metrics, columns=training_mat['uid'])
-    df_metrics.index = pd.to_datetime(date)
+    df_metrics = pd.DataFrame(metrics, columns=data['uid'])
+    df_metrics.index = pd.to_datetime(data['date'])
     return df_metrics
 
 def read_data_file(fname, force, callf, args):
@@ -145,24 +171,22 @@ def read_data_file(fname, force, callf, args):
     """
     if not force and os.path.isfile(fname):
         say("reading file: " + fname)
-        with open(fname, 'rb') as filehandle:
-            if 'VAE' in str(fname):
-                res = pickle.load(filehandle)
-                res['clf'].model_ = res['clf']._build_model()
-            else:
-                res = pickle.load(filehandle)
+        if 'VAE' in str(fname):
+            res = load_and_compress_pickle(fname)
+            res['clf'].model_ = res['clf']._build_model()
+        else:
+            res = load_and_compress_pickle(fname)
     else:
         error("building file: " + fname)
         res = callf(**args)
         if res != None: # and not 'VAE' in str(fname):
-            with open(fname, 'wb') as filehandle:
-                if 'VAE' in str(fname):
-                    model = res['clf'].model_
-                    res['clf'].model_ = None
-                    pickle.dump(res, filehandle)
-                    res['clf'].model_= model
-                else:
-                    pickle.dump(res, filehandle)
+            if 'VAE' in str(fname):
+                model = res['clf'].model_
+                res['clf'].model_ = None
+                compress_pickle(res, fname)
+                res['clf'].model_= model
+            else:
+                compress_pickle(res, fname)
     return res
 
 def build_model(clf_name, clf, df, df_testing):
@@ -201,74 +225,39 @@ def id2uid(id, uid):
     """ uid: dictionary {uid: id} """
     return list(uid.values()).index(id)
 
-# IF
-IF_anom = {} # dictionary with the anomalies detected by IF for each node
-def compute_IF(id, anom):
+# compute anomalies for clf_name
+def compute_method(training_mat, testing_mat, clf_name, id, fid=None):
     """
     anomaly detection for node id using the training_mat,testing_mat datasets.
     """
-    global IF_anom, classifiers
-    global training_mat, testing_mat
-    metrics_training = get_metrics_from_node(training_mat['metric'], training_mat['date'], id)
-    metrics_testing = get_metrics_from_node(testing_mat['metric'], testing_mat['date'], id)
+    global classifiers
+    metrics_training = get_metrics_from_node(training_mat, id)
+    metrics_testing = get_metrics_from_node(testing_mat, id)
     # take anomalies only on dates where the node is alive
     valid_days = [sum(metrics_testing.iloc[id]>0)>0 for id in range(metrics_testing.shape[0])]
     if sum(valid_days) == 0:
         error("skipping node {} ({}): not alive during any testing captures".format(
             id, uid.uid2hname(id2uid(id, training_mat['uid']))))
-        return (0, 0)
+        return None
     metrics_testing = metrics_testing.iloc[valid_days]
-    clf_name = 'Isolation Forest'
     clf = classifiers[clf_name]
     model_dir = os.getcwd() + "/models"
     filen = os.path.join(model_dir, 
-                         "clf-{}-{}.pkl".format(type(clf).__name__, id))
-    pkl_IF = read_data_file(
+                         "clf-{}-{}-{}.pkl".format(type(clf).__name__, fid, id) if fid 
+                         else "clf-{}-{}.pkl".format(type(clf).__name__, id))
+    pkl = read_data_file(
         filen, False, build_model, 
         args={'clf_name': clf_name, 'clf': clf,
               'df': metrics_training,
               'df_testing': metrics_testing})
-    pkl_IF['stop_training_time']
-    pkl_IF['stop_prediction_time']
-    IF_anom.update({id: pkl_IF})
-    return count_anom(pkl_IF['y_pred_idx_test'], anom) # 10/4
-
-# VAE
-VAE_anom = {} # dictionary with the anomalies detected by VAE for each node
-def compute_VAE(id, anom):
-    """
-    anomaly detection for node id using the training_mat,testing_mat datasets.
-    """
-    global VAE_anom, classifiers
-    global training_mat,testing_mat
-    metrics_training = get_metrics_from_node(training_mat['metric'], training_mat['date'], id)
-    metrics_testing = get_metrics_from_node(testing_mat['metric'], testing_mat['date'], id)
-    # take anomalies only on dates where the node is alive
-    valid_days = [sum(metrics_testing.iloc[id]>0)>0 for id in range(metrics_testing.shape[0])]
-    if sum(valid_days) == 0:
-        error("skipping node {} ({}): not alive during any testing captures".format(
-            id, uid.uid2hname(id2uid(id, training_mat['uid']))))
-        return (0, 0)
-    metrics_testing = metrics_testing.iloc[valid_days]
-    clf_name = 'Variational auto encoder (VAE)'
-    clf = classifiers[clf_name]
-    model_dir = os.getcwd() + "/models"
-    filen = os.path.join(model_dir, 
-                         "clf-{}-{}.pkl".format(type(clf).__name__, id))
-    pkl_VAE = read_data_file(
-        filen, False, build_model, 
-        args={'clf_name': clf_name, 'clf': clf,
-              'df': metrics_training,
-              'df_testing': metrics_testing})
-    pkl_VAE['stop_training_time']
-    pkl_VAE['stop_prediction_time']
-    VAE_anom.update({id: pkl_VAE})
-    return count_anom(pkl_VAE['y_pred_idx_test'], anom) # 10/4
+    pkl['stop_training_time']
+    pkl['stop_prediction_time']
+    return pkl
 
 #
 # plotting
 #
-def plot_anom(anom_count, node_count, method):
+def plot_anom(anom_count, node_count, method, anom=None, title=None, fname=None):
     """ Plot the anomalies from anom_count and the number of nodes in node_count.
     """
     df = anom_count.copy()
@@ -278,23 +267,28 @@ def plot_anom(anom_count, node_count, method):
     df.sort_values(by=['index'], ascending=True).plot.scatter(x='index',y='count', fontsize=10, ax=ax, c='red')
     # node_count.plot.line(x='index', ax=ax)
     node_count.plot(drawstyle="steps", x='index', ax=ax)
-    [ax.axvline(np.datetime64(v), color="r", ls='--') for v in anom]
-    # [ax.axhline(y, color="b", ls='--') for y in [len(training_mat['uid']), len(training_mat['uid'])/2]]
-    ax.set_title("{} {}/{}".format(
-        method,
-        count_anom(anom_count[df['count']>node_count['vote']]['index'], anom),
-        count_anom(testing_mat['date'], anom)))
+    if anom:
+        [ax.axvline(np.datetime64(v), color="r", ls='--') for v in anom]
+        # [ax.axhline(y, color="b", ls='--') for y in [len(training_mat['uid']), len(training_mat['uid'])/2]]
+        ax.set_title("{} {}/{}".format(
+            method,
+            count_anom(anom_count[df['count']>node_count['vote']]['index'], anom),
+            count_anom(testing_mat['date'], anom)))
+    if title:
+        ax.set_title("{} {}".format(method, title))
     ax.set_xlabel("date (testing set)")
     ax.set_ylabel("Anomaly count")
     plt.xticks(fontsize=10, rotation=45)
     plt.show()
+    if fname:
+        save_figure(fname)
 
-def count_anom_from_nodes(date, IF_anom):
-    """ Returns a DF with dates and the amount of anomalies detected by IF
+def count_anom_from_nodes(date, ML_anom):
+    """ Returns a DF with dates and the amount of anomalies detected by ML
     in each date.
     """
     res = {d:0 for d in date}
-    for f in IF_anom.values():
+    for f in ML_anom.values():
         for d in f['y_pred_idx_test']:
             if d in res:
                 res[d] = res[d] + 1
@@ -303,61 +297,236 @@ def count_anom_from_nodes(date, IF_anom):
     return pd.DataFrame({'index': list(res.keys())}).join(
         pd.DataFrame({'count': list(res.values())}))
 
-def get_live_node(d):
+def get_live_node(d, id):
     """
     returns a working node from capture c in d
     """
-    for i in range(d[0].shape[0]):
-        if(d[i,i] == 128000000000):
+    for i in range(d[id][0].shape[0]):
+        if(d[id][i,i] == 128000000000):
             return i
-    return None
+    error("live node {}?".format(id))
+    return 0
+
+def get_node_count(test_mat):
+    live_node = [get_live_node(test_mat['metric'], i) for i in range(len(test_mat['date']))]
+    # DF with how many nodes are alive in every capture
+    return pd.DataFrame.from_dict(
+        orient='columns', 
+        data={'index': test_mat['date'],
+              'nodes':
+              [sum(test_mat['metric'][i][live_node[i]]>-1) for i in range(len(test_mat['date']))],
+              'vote':
+              [sum(test_mat['metric'][i][live_node[i]]>-1)/2 for i in range(len(test_mat['date']))]})
 
 def save_figure(file, font=14):
     plt.rcParams.update({'font.size': font})
     plt.savefig('figures/'+file, format='pdf',
                 bbox_inches='tight', pad_inches=0)
 
+def unify_features(train, test):
+    """ Supress row/columns not common in train/test
+    """
+    def get_common_features(f1, f2):
+        return list(set.intersection(set(f1), set(f2)))
+    #
+    def unify_uid(d, common_uid, name):
+        def rm_row_col(d, idx):
+            d = np.delete(d, idx, axis=0)
+            d = np.delete(d, idx, axis=1)
+            return d
+        #
+        uid_dif = set.difference(set(d['uid']), set(common_uid))
+        if len(uid_dif) > 0:
+            idx_dif = [d['uid'][i] for i in uid_dif]
+            say("removing nodes from {} set: {}".format(name, uid_dif))
+            d['uid'] = {common_uid[i]:i for i in range(len(common_uid))}
+            for id in range(len(d['rt'])):
+                for name in ['rt', 'adj', 'metric']:
+                    d[name][id] = rm_row_col(d[name][id], idx_dif)
+        return d
+    common_uid = get_common_features(train['uid'], test['uid'])
+    train = unify_uid(train, common_uid, 'training')
+    test = unify_uid(test, common_uid, 'testing')
+    return train, test
+
+def get_ML_data(ftrain, date, ML):
+    """ compute anomalies using training data in "ftrain" and testing data in "ml-rt-date.pkl"
+    """
+    if ML == 'IF':
+        clf_short_name = "IForest"
+        clf_name = 'Isolation Forest'
+    elif ML == 'CBLOF':
+        clf_short_name = "CBLOF"
+        clf_name = 'Cluster-based Local Outlier Factor (CBLOF)'
+    elif ML == 'VAE':
+        clf_short_name = "VAE"
+        clf_name = 'Variational auto encoder (VAE)'
+    else:
+        error("ML {}?".format(ML))
+        return None
+    model_dir = os.getcwd() + "/models"
+    fname = os.path.join(model_dir, "clf-{}-{}.pkl".format(clf_short_name, date))
+    if os.path.isfile(fname) or os.path.isfile(fname+'.bz2'):
+        return load_and_compress_pickle(fname)
+    #
+    say("building {}".format(fname))
+    say("reading training_mat ({})".format(ftrain))
+    training_mat = load_and_compress_pickle(dd + ftrain)
+    #
+    ftest = "ml-rt-{}.pkl".format(date)
+    say("reading testing_mat ({})".format(ftest))
+    test_mat = load_and_compress_pickle(dd + ftest)
+    #
+    train, test_mat = unify_features(training_mat, test_mat)
+    ML_anom = {} # dictionary with the anomalies detected by ML for each node
+    for id in range(len(train['uid'])):
+        pkl_ML = compute_method(train, test_mat, clf_name, id, date)
+        if pkl_ML:
+            ML_anom.update({id: pkl_ML})
+            print("id {} ({}), anomalies: {}".format(
+                id, uid.uid2hname(id2uid(id, train['uid'])), 
+                len(pkl_ML['y_pred_idx_test'])))
+    node_count = get_node_count(test_mat)
+    anom_count_ML = count_anom_from_nodes(test_mat['date'], ML_anom)
+    compress_pickle((ML_anom, node_count, anom_count_ML), fname)
+    return ML_anom, node_count, anom_count_ML
+
 #
 # build IF data
 #
+IF_anom = {} # dictionary with the anomalies detected by IF for each node
 for id in range(len(training_mat['uid'])):
-    print("id {} ({}), anomalies: {}".format(
-        id, uid.uid2hname(id2uid(id, training_mat['uid'])), compute_IF(id, anom)))
+    pkl_IF = compute_method(training_mat, testing_mat, 'Isolation Forest', id)
+    if pkl_IF:
+        IF_anom.update({id: pkl_IF})
+        print("id {} ({}), anomalies: {}".format(
+        id, uid.uid2hname(id2uid(id, training_mat['uid'])), 
+        count_anom(pkl_IF['y_pred_idx_test'], anom)))
+
+#
+# build CBLOF data
+#
+CBLOF_anom = {} # dictionary with the anomalies detected by CBLOF for each node
+for id in range(len(training_mat['uid'])):
+    pkl_CBLOF = compute_method(training_mat, testing_mat, 'Cluster-based Local Outlier Factor (CBLOF)', id)
+    if pkl_CBLOF:
+        CBLOF_anom.update({id: pkl_CBLOF})
+        print("id {} ({}), anomalies: {}".format(
+        id, uid.uid2hname(id2uid(id, training_mat['uid'])), 
+        count_anom(pkl_CBLOF['y_pred_idx_test'], anom)))
 
 #
 # build VAE data
 #
+VAE_anom = {} # dictionary with the anomalies detected by VAE for each node
 for id in range(len(training_mat['uid'])):
-    print("id {} ({}), anomalies: {}".format(
-        id, uid.uid2hname(id2uid(id, training_mat['uid'])), compute_VAE(id, anom)))
+    pkl_VAE = compute_method(training_mat, testing_mat, 'Variational auto encoder (VAE)', id)
+    if pkl_VAE:
+        VAE_anom.update({id: pkl_VAE})
+        print("id {} ({}), anomalies: {}".format(
+            id, uid.uid2hname(id2uid(id, training_mat['uid'])), 
+            count_anom(pkl_VAE['y_pred_idx_test'], anom)))
 
 #
 # plot ressults
 #
+node_count = get_node_count(testing_mat)
 
-live_node = [get_live_node(testing_mat['metric'][i]) for i in range(len(testing_mat['date']))]
-# DF with how many nodes are alive in every capture
-node_count = pd.DataFrame.from_dict(
-    orient='columns', 
-    data={'index': testing_mat['date'],
-          'nodes':
-          [sum(testing_mat['metric'][i][live_node[i]]>-1) for i in range(len(testing_mat['date']))],
-          'vote':
-          [sum(testing_mat['metric'][i][live_node[i]]>-1)/2 for i in range(len(testing_mat['date']))]})
-
+#
 # count the anomalies found in IF_anom
+#
 anom_count_IF = count_anom_from_nodes(testing_mat['date'], IF_anom)
 len(anom_count_IF)
 
-plot_anom(anom_count_IF, node_count, 'IF')
+plot_anom(anom_count_IF, node_count, 'IF', anom)
 
+# save_figure("anomalies-using-metrics-IF.pdf")
+
+#
+# count the anomalies found in CBLOF_anom
+#
+anom_count_CBLOF = count_anom_from_nodes(testing_mat['date'], CBLOF_anom)
+len(anom_count_CBLOF)
+
+plot_anom(anom_count_CBLOF, node_count, 'CBLOF', anom)
+
+# save_figure("anomalies-using-metrics-CBLOF.pdf")
+
+#
 # count the anomalies found in VAE_anom
+#
 anom_count_VAE = count_anom_from_nodes(testing_mat['date'], VAE_anom)
 len(anom_count_VAE)
 
-plot_anom(anom_count_VAE, node_count, 'VAE')
+plot_anom(anom_count_VAE, node_count, 'VAE', anom)
 
-# save_figure("anomalies-using-metrics-IF.pdf")
+# save_figure("anomalies-using-metrics-VAE_anom.pdf")
+
+#
+# other months
+#
+#
+# IF
+#
+date = "21-04"
+IF_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'IF')
+plot_anom(anom_count_ML, node_count, 'IF', title=date, fname="ml-IF-{}.pdf".format(date))
+
+# building multiple files
+year = '21'
+for m in range(3, 4+1):
+    date = "{}-{:02d}".format(year, m)
+    print(date)
+    IF_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'IF')
+
+# plotting multiple files
+year = '21'
+for m in range(3, 4+1):
+    date = "{}-{:02d}".format(year, m)
+    IF_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'IF')
+    plot_anom(anom_count_ML, node_count, 'IF', title=date, fname="ml-IF-{}.pdf".format(date))
+
+#
+# CBLOF
+#
+date = "21-04"
+CBLOF_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'CBLOF')
+plot_anom(anom_count_ML, node_count, 'CBLOF', title=date, fname="ml-CBLOF-{}.pdf".format(date))
+
+# building multiple files
+year = '21'
+for m in range(3, 4+1):
+    date = "{}-{:02d}".format(year, m)
+    print(date)
+    CBLOF_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'CBLOF')
+
+# plotting multiple files
+year = '21'
+for m in range(3, 4+1):
+    date = "{}-{:02d}".format(year, m)
+    CBLOF_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'CBLOF')
+    plot_anom(anom_count_ML, node_count, 'CBLOF', title=date, fname="ml-CBLOF-{}.pdf".format(date))
+
+#
+# VAE
+#
+date = "21-04"
+VAE_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'VAE')
+plot_anom(anom_count_ML, node_count, 'VAE', title=date, fname="ml-VAE-{}.pdf".format(date))
+
+# building multiple files
+year = '21'
+for m in range(3, 4+1):
+    date = "{}-{:02d}".format(year, m)
+    print(date)
+    VAE_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'VAE')
+
+# plotting multiple files
+year = '21'
+for m in range(3, 4+1):
+    date = "{}-{:02d}".format(year, m)
+    VAE_anom, node_count, anom_count_ML = get_ML_data("ml-rt-training_dataset.pkl", date, 'VAE')
+    plot_anom(anom_count_ML, node_count, 'VAE', title=date, fname="ml-VAE-{}.pdf".format(date))
 
 #
 # testing
